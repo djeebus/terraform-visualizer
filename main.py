@@ -1,6 +1,9 @@
 import collections
+import functools
+import itertools
 import os
 import re
+import typing
 
 import click
 import hcl2
@@ -9,142 +12,172 @@ import hcl2
 @click.command()
 @click.argument('path', type=click.Path(file_okay=False, dir_okay=True))
 def cli(path):
-    all_items = collections.defaultdict(dict)
-    walk_path(path, all_items)
+    vertices, module_names_to_paths = _collect_vertices(path)
+    click.echo(f"found {len(vertices)} items")
+    edges = _find_edges(vertices, module_names_to_paths)
 
-    _write_graph(all_items)
-
-
-def _write_graph(all_items):
-
-    all_refs = set()
-    non_root = set()
-    edges = set()
-
-    item_fmts = {
-        'data': '[({name})]',
-        'module': '(({name}))',
-        'variable': '([{name}])',
-    }
-
-    print('```mermaid')
-    print('  graph LR')
-    for key, items in all_items.items():
-        print()
-        for name, item in items.items():
-            full_name = f'{key}.{name}'
-
-            item_fmt = item_fmts.get(item.get('__type__'))
-            if item_fmt:
-                click.echo(f'  {full_name}{item_fmt.format(name=full_name)}')
-            else:
-                click.echo(f'  {full_name}')
-
-            all_refs.add(full_name)
-            refs = list(_get_refs(item))
-            if not refs:
-                parent = item.get('__parent__')
-                if parent:
-                    refs.append(parent)
-
-            if refs:
-                non_root.add(full_name)
-                for ref in refs:
-                    edge_key = ref, full_name
-                    if edge_key in edges:
-                        continue
-
-                    print(f'  {ref} --> {full_name}  %% {item["__path__"]}')
-                    edges.add(edge_key)
-
-    print('```')
+    _write_graph(vertices, edges)
 
 
-def _parse_data(path, item_type, name, item, all_items):
-    return item_type, name, item
+def to(cls):
+    def _to(func):
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            result = func(*args, **kwargs)
+            return cls(result)
+        return wrapped
+    return _to
 
 
-def _parse_default(path, item_type, name, item, all_items):
-    return item_type, name, item
+@to(list)
+def _find_edges(vertices, module_names_to_paths):
+    for vertex in vertices:
+        name = vertex['__id__']
+        deps = _get_deps(vertex, module_names_to_paths)
+
+        for ref in deps:
+            yield ref, name
 
 
-def _parse_local(path, item_type, name, item, all_items):
-    return 'local', name, dict()
-
-
-def _parse_module(path, item_type, name, item, all_items):
-    module_path = os.path.join(path, item['source'])
-    module_path = os.path.abspath(module_path)
-    walk_path(module_path, all_items, parent=f'module.{name}')
-
-    return item_type, name, item
-
-
-def _parse_provider(path, item_type, name, item, all_items):
-    return
-
-
-def _parse_resource(path, item_type, name, item, all_items):
-    item_type = name
-    (name, item), = item.items()
-    return item_type, name, item
-
-
-def _parse_variable(path, item_type, name, item, all_items):
-    return 'var', name, item
-
-
-parsers = {
-    'data': _parse_data,
-    'locals': _parse_local,
-    'module': _parse_module,
-    'provider': _parse_provider,
-    'resource': _parse_resource,
-    'variable': _parse_variable,
+item_fmts = {
+    'data': '{id}[({label})]',
+    'locals': '{id}({label})',
+    'module': '{id}(({label}))',
+    'output': '{id}({label})',
+    'provider': '{id}({label})',
+    'resource': '{id}({label})',
+    'variable': '{id}([{label}])',
 }
 
 
-def walk_path(path, all_items, parent=None):
-    for file in os.listdir(path):
-        _, ext = os.path.splitext(file)
-        if ext != '.tf':
-            continue
+def _write_graph(vertices, edges):
+    print('```mermaid')
+    print('  graph LR')
 
-        full_path = os.path.join(path, file)
-        click.echo(f'parsing {full_path} ...')
-        with open(full_path, 'r') as fp:
-            data = hcl2.load(fp)
+    print()
+    printed_full_names = set()
+    vertices = sorted(vertices, key=lambda v: v['__parent__'])
+    grouped = itertools.groupby(vertices, key=lambda v: v['__parent__'])
+    modules = list()
+    for parent, vertices in grouped:
+        if parent:
+            print(f'  subgraph {parent}')
 
-        for item_type, items in data.items():
-            if item_type == 'terraform':
+        for vertex in vertices:
+            if vertex['__type__'] == 'module':
+                modules.append(vertex)
                 continue
 
-            for item_set in items:
-                for name, item in item_set.items():
-                    parser = parsers.get(item_type, _parse_default)
-                    result = parser(path, item_type, name, item, all_items)
-                    if not result:
-                        continue
+            _print_label(vertex, printed_full_names)
 
-                    this_item_type, name, item = result
-                    item["__path__"] = full_path
-                    item["__parent__"] = parent
-                    item["__type__"] = item_type
-                    all_items[this_item_type][name] = item
+        if parent:
+            print('  end')
+        print()
+
+    for module in modules:
+        _print_label(module, printed_full_names)
+
+    print()
+    added_edges = set()
+    for ref, full_name in edges:
+        edge_key = ref, full_name
+        if edge_key in added_edges:
+            continue
+
+        print(f'  {ref} --> {full_name}')
+        added_edges.add(edge_key)
+    print('```')
+
+
+def _print_label(vertex, printed_full_names: set):
+    vertex_id = vertex['__id__']
+    if vertex_id in printed_full_names:
+        return
+
+    label = vertex['__name__']
+
+    item_fmt = item_fmts[vertex['__type__']]
+    click.echo(f'    {item_fmt.format(id=vertex_id, label=label)}')
+    printed_full_names.add(vertex_id)
+
+
+def _collect_vertices(path) -> typing.Tuple[list, dict]:
+    root_path = path
+    work = [(path, '')]
+    done = set()
+
+    vertices = list()
+    module_names_to_paths = dict()
+
+    while work:
+        path, parent = work.pop()
+        if path in done:
+            continue
+
+        for file in os.listdir(path):
+            _, ext = os.path.splitext(file)
+            if ext != '.tf':
+                continue
+
+            full_path = os.path.join(path, file)
+            # click.echo(f'parsing {full_path} ...')
+            with open(full_path, 'r') as fp:
+                data = hcl2.load(fp)
+
+            for item_type, items in data.items():
+                if item_type == 'terraform':
+                    continue
+
+                for item_set in items:
+                    for name, item in item_set.items():
+                        if item_type == 'locals':
+                            item = {'value': item}
+                        item["__path__"] = full_path
+                        item["__parent__"] = parent
+                        item["__type__"] = item_type
+                        item["__name__"] = f'{item_type}.{name}'
+                        item["__id__"] = _canonical_name(item_type, name, item, parent)
+                        vertices.append(item)
+
+                        if item_type == 'module':
+                            module_path = os.path.join(path, item['source'])
+                            rel_path = os.path.relpath(module_path, root_path)
+
+                            module_names_to_paths[f'module.{name}'] = rel_path
+                            work.append((module_path, f'module:{rel_path}'))
+
+    return vertices, module_names_to_paths
+
+
+def _canonical_name(item_type, name, item, parent):
+    if item_type == 'variable':
+        item_type = 'var'
+    elif item_type == 'resource':
+        item_type = name
+        name, = (k for k in item.keys() if k.startswith('__') is False)
+    elif item_type == 'provider':
+        alias = item.get('alias')
+        if alias:
+            name = f'{name}.{alias}'
+
+    if parent:
+        return f'{parent}.{item_type}.{name}'
+    return f'{item_type}.{name}'
 
 
 ref_re = re.compile(r'\$\{.*?(\w+\.\w+).*}')
 
 
-def _get_refs(item, *, key=None):
+@to(list)
+def _get_deps(item, module_names_to_paths):
     if isinstance(item, dict):
         for key, value in item.items():
-            yield from _get_refs(value, key=key)
+            yield from _get_deps(value, module_names_to_paths)
         return
 
     if isinstance(item, list):
         for subitem in item:
-            yield from _get_refs(subitem, key=key)
+            yield from _get_deps(subitem, module_names_to_paths)
         return
 
     if not isinstance(item, str):
@@ -153,7 +186,10 @@ def _get_refs(item, *, key=None):
     # parse strings to see if there's a ref
     m = ref_re.search(item)
     if m:
-        yield m.group(1)
+        dep = m.group(1)
+        if dep.startswith('module.'):
+            dep = module_names_to_paths[dep]
+        yield dep
 
 
 if __name__ == '__main__':
