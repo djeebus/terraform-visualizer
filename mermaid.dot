@@ -1,0 +1,58 @@
+graph LR
+    %% ./accounts.tf
+    module.aws_account_security([module.aws_account_security])
+    module.aws_account_security_logging([module.aws_account_security_logging])
+    module.aws_account_security_dev([module.aws_account_security_dev])
+    module.aws_account_security_tfc([module.aws_account_security_tfc])
+
+    data.terraform_remote_state.global --> module.aws_account_security
+    data.terraform_remote_state.global --> module.aws_account_security_logging
+    data.terraform_remote_state.global --> module.aws_account_security_dev
+    data.terraform_remote_state.global --> module.aws_account_security_tfc
+
+
+    %% ./backend.tf
+    data.terraform_remote_state.global
+
+
+    %% ./block_public_s3.tf
+    module.s3_block_public_security_dev([module.s3_block_public_security_dev])
+    module.s3_block_public_security_logging([module.s3_block_public_security_logging])
+    module.s3_block_public_security([module.s3_block_public_security])
+
+    module:../../modules/s3_block_public:output.id -.-> module.aws_account_security_dev
+    module.aws_account_security_dev --> module.s3_block_public_security_dev
+    module:../../modules/aws_account:output.id -.-> module.aws_account_security_dev
+    module.aws_account_security_dev --> module.s3_block_public_security_dev
+    module:../../modules/aws_account:output.id -.-> module.aws_account_security
+    module.aws_account_security --> module.s3_block_public_security
+
+    %% ../../modules/aws_account
+    subgraph module:../../modules/aws_account [../../modules/aws_account]
+        %% main.tf
+        module:../../modules/aws_account:local.email_prefix[local.email_prefix]
+        module:../../modules/aws_account:local.domain[local.domain]
+
+        module:../../modules/aws_account:output.id[output.id]
+        module:../../modules/aws_account:var.name[var.name]
+        module:../../modules/aws_account:var.organization_unit[var.organization_unit]
+        module:../../modules/aws_account:var.environment[var.environment]
+        module:../../modules/aws_account:var.owner[var.owner]
+        module:../../modules/aws_account:var.slack_channel[var.slack_channel]
+        module:../../modules/aws_account:var.account_name[var.account_name]
+        module:../../modules/aws_account:resource.aws_organizations_account.main[resource.aws_organizations_account.main]
+
+        module:../../modules/aws_account:local.email_prefix --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.name --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.organization_unit --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.environment --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.owner --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.slack_channel --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:var.account_name --> module:../../modules/aws_account:resource.aws_organizations_account.main
+        module:../../modules/aws_account:resource.aws_organizations_account.main --> module:../../modules/aws_account:output.id
+    end
+
+    %% ../../modules/s3_block_public
+    subgraph module:../../modules/s3_block_public [../../modules/s3_block_public]
+        module:../../modules/aws_account:output.id[output.id]
+    end
